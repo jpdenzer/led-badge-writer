@@ -15,6 +15,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import serial
 
+from .fonts import BUILTIN_FONTS
+
 logger = getLogger(__name__)
 stream_handler = StreamHandler()
 stream_handler.setLevel(logging.DEBUG)
@@ -163,13 +165,20 @@ def render_text(text: str, lines: int,
                 font_path: Optional[str] = None, font_size: Optional[int] = None) -> Image.Image:
     """Render text as a bitmap image exactly `lines` pixels high.
 
+    `font_path` may also be the name of a built-in pixel font (see `BUILTIN_FONTS`).
     Without `font_path`, Pillow's built-in bitmap font is used.
     Without `font_size`, the largest size that fits in `lines` is chosen.
 
     >>> render_text("Hello", 12).height
     12
+    >>> render_text("Hello", 11, "pixel").size
+    (21, 11)
     """
-    if font_path is None:
+    if font_path in BUILTIN_FONTS:
+        if font_size is not None:
+            logger.warning("--font-size is ignored with built-in font %r.", font_path)
+        glyphs = BUILTIN_FONTS[font_path].render(text)
+    elif font_path is None:
         glyphs = _draw_text(text, ImageFont.load_default())
     elif font_size is not None:
         glyphs = _draw_text(text, ImageFont.truetype(font_path, font_size))
@@ -189,6 +198,41 @@ def render_text(text: str, lines: int,
 def load_text(text: str, lines: int, threshold: int,
               font_path: Optional[str] = None, font_size: Optional[int] = None, **mode) -> Slot:
     return image_to_slot(render_text(text, lines, font_path, font_size), lines, threshold, **mode)
+
+
+def align_image(image: Image.Image, lines: int, width: int, align: str = "left") -> Image.Image:
+    """Pad an image narrower than the display to `width`, aligned left, center or right.
+
+    >>> align_image(Image.new("L", (10, 11)), 11, 44, "center").size
+    (44, 11)
+    >>> align_image(Image.new("L", (50, 11)), 11, 44, "center").size
+    (50, 11)
+    """
+    image = _fit_image(image, lines)
+    if align == "left" or image.width >= width:
+        return image
+    canvas = Image.new("L", (width, lines))
+    canvas.paste(image, ((width - image.width) // 2 if align == "center" else width - image.width, 0))
+    return canvas
+
+
+def slot_to_ascii(slot: Slot, width: int, on: str = "\u2588", off: str = "\u00b7") -> str:
+    """Draw the bitmap of a slot as text; a bar marks the right edge of the display.
+
+    >>> print(slot_to_ascii(Slot(bitmap=bytes([0b10100000, 0b11000000]), columns=1), 4, "#", "."))
+    #.#.|....
+    ##..|....
+    """
+    lines = len(slot.bitmap) // slot.columns if slot.columns else 0
+    rows = []
+    for line in range(lines):
+        row = "".join(
+            on if (x >> (PIXEL_PER_COLUMN - 1 - i)) & 1 else off
+            for x in slot.bitmap[(line * slot.columns):((line + 1) * slot.columns)]
+            for i in range(PIXEL_PER_COLUMN)
+        )
+        rows.append(row[:width] + "|" + row[width:] if len(row) > width else row)
+    return "\n".join(rows)
 
 
 def save_preview(path: str, lines: int, display_width: int, save_path: str):
@@ -324,9 +368,12 @@ def main():
     parser.add_argument("-T", "--text", action="store_true",
                         help="treat each path as text to display instead of an image path.")
     parser.add_argument("-f", "--font", type=str, default=None,
-                        help="TrueType/OpenType font file for --text (default: built-in bitmap font).")
+                        help="font for --text: a built-in pixel font ({}) or a TrueType/OpenType "
+                             "font file (default: Pillow's bitmap font).".format(", ".join(BUILTIN_FONTS)))
     parser.add_argument("-s", "--font-size", type=int, default=None,
-                        help="font size for --font (default: largest size fitting the lines).")
+                        help="font size for a font file (default: largest size fitting the lines).")
+    parser.add_argument("-a", "--align", default="left", choices=["left", "center", "right"],
+                        help="align content narrower than the display (default: left).")
     parser.add_argument("--hid", action="store_true",
                         help=f"write to {HID_LINES}x{HID_WIDTH} USB HID badge "
                              f"({HID_VENDOR_ID:04x}:{HID_PRODUCT_ID:04x}) instead of serial badge.")
@@ -343,7 +390,9 @@ def main():
     parser.add_argument("--brightness", default=None, choices=brightness_list,
                         help="brightness of LED name badge (default: 4, unsupported with --hid).")
     parser.add_argument("-p", "--preview", action="store_true",
-                        help="save preview of images (skip writing payload).")
+                        help="show what would be written in the terminal (skip writing payload).")
+    parser.add_argument("--save-preview", action="store_true",
+                        help="save preview images to --savepath1..8 (skip writing payload).")
     for x in range(SLOT_MAX):
         parser.add_argument(f"--border{x + 1}", action="store_true",
                             help=f"show border on slot 1-{SLOT_MAX}."
@@ -373,26 +422,35 @@ def main():
         images = [render_text(x, args.lines, args.font, args.font_size) for x in args.paths]
     else:
         images = [Image.open(x) for x in args.paths]
-    if not args.preview:
-        slot_list = [
-            image_to_slot(
-                x, args.lines, args.threshold,
-                **{k: v for k, v in{
-                    "border": getattr(args, f"border{i + 1}"),
-                    "blink": getattr(args, f"blink{i + 1}"),
-                    "speed": speed_list.get(getattr(args, f"speed{i + 1}")),
-                    "motion": motion_list.get(getattr(args, f"motion{i + 1}"))
-                }.items() if v is not None}
-            )
-            for i, x in enumerate(images[:SLOT_MAX])
-        ]
+    images = [align_image(x, args.lines, args.width, args.align) for x in images[:SLOT_MAX]]
+    slot_list = [
+        image_to_slot(
+            x, args.lines, args.threshold,
+            **{k: v for k, v in{
+                "border": getattr(args, f"border{i + 1}"),
+                "blink": getattr(args, f"blink{i + 1}"),
+                "speed": speed_list.get(getattr(args, f"speed{i + 1}")),
+                "motion": motion_list.get(getattr(args, f"motion{i + 1}"))
+            }.items() if v is not None}
+        )
+        for i, x in enumerate(images)
+    ]
+    if args.preview:
+        for i, slot in enumerate(slot_list):
+            print(f"Slot {i + 1}: {slot.columns * PIXEL_PER_COLUMN} px wide "
+                  f"(display is {args.width} px; | marks its right edge)")
+            print(slot_to_ascii(slot, args.width))
         if args.hid:
-            write_hid_payload(slot_list)
-        else:
-            write_payload(brightness, slot_list, args.device, args.baud)
-    else:
-        for i, image in enumerate(images[:SLOT_MAX]):
+            print(f"Total: {sum(x.columns for x in slot_list)} of {HID_REPORT_SIZE} columns used.")
+    if args.save_preview:
+        for i, image in enumerate(images):
             save_preview_image(image, args.lines, args.width, getattr(args, f"savepath{i + 1}"))
+    if args.preview or args.save_preview:
+        return
+    if args.hid:
+        write_hid_payload(slot_list)
+    else:
+        write_payload(brightness, slot_list, args.device, args.baud)
 
 
 if __name__ == "__main__":
