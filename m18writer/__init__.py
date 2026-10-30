@@ -1,9 +1,8 @@
-"""Meta infomation of m1-8-writer."""
+"""Meta infomation of led-badge-writer (fork of m1-8-writer by Amane Katagiri)."""
 
-__author__ = "Amane Katagiri"
-__contact__ = "amane@ama.ne.jp"
-__copyright__ = "Copyright (C) 2020 Amane Katagiri"
-__credits__ = ["Amane Katagiri"]
-__date__ = "2020-01-19"
+__author__ = "Juan Denzer"
+__copyright__ = "Copyright (C) 2020 Amane Katagiri, Copyright (C) 2026 Juan Denzer"
+__credits__ = ["Amane Katagiri", "Juan Denzer"]
+__date__ = "2026-10-30"
 __license__ = "MIT"
-__version__ = "0.9.2"
+__version__ = "0.10.0"

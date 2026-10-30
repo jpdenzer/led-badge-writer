@@ -1,4 +1,8 @@
-# M1-8 writer
+# LED badge writer
+
+Write text and images to LED name badges: serial M1-8 badges and USB HID B1248 badges (`0483:5750`).
+
+This is a fork of [m1-8-writer](https://github.com/amane-katagiri/m1-8-writer) by [Amane Katagiri](https://github.com/amane-katagiri), which did the original M1-8 protocol work and writer.
 
 ## Target Device
 
@@ -8,9 +12,9 @@ This script can write to LED name badge which ...
 * shows "M1-8" at startup.
 * can be written by "LED Display" and "Mini LED Display".
 
-LED Display: ![LED Display](https://raw.githubusercontent.com/amane-katagiri/m1-8-writer/master/static/led-display.png)
+LED Display: ![LED Display](https://raw.githubusercontent.com/jpdenzer/led-badge-writer/master/static/led-display.png)
 
-Mini LED Display: ![Mini LED Display](https://raw.githubusercontent.com/amane-katagiri/m1-8-writer/master/static/mini-led-display.png)
+Mini LED Display: ![Mini LED Display](https://raw.githubusercontent.com/jpdenzer/led-badge-writer/master/static/mini-led-display.png)
 
 ## Data Structure
 
@@ -180,23 +184,27 @@ m18write -h
 ## Install
 
 ```
-pip install m1-8-writer
+pip install git+https://github.com/jpdenzer/led-badge-writer.git
 ```
 
 For USB HID badges, install with HID support:
 
 ```
-pip install "m1-8-writer[hid]"
+pip install "led-badge-writer[hid] @ git+https://github.com/jpdenzer/led-badge-writer.git"
 ```
+
+This installs the `led-badge-writer` command. The original `m18write` command also still works, and the examples above use it.
 
 ## Licence
 
-[MIT](https://github.com/tcnksm/tool/blob/master/LICENCE)
+[MIT](LICENSE)
 
-## Author
+## Authors
 
-[amane-katagiri](https://github.com/amane-katagiri)
+* [Amane Katagiri](https://github.com/amane-katagiri): original author of [m1-8-writer](https://github.com/amane-katagiri/m1-8-writer)
+* [Juan Denzer](https://github.com/jpdenzer): text rendering and USB HID badge support
 
 ## Related References
 
 * [http://www.daveakerman.com/?p=1440](http://www.daveakerman.com/?p=1440)
+* [B1248 LED name badge protocol reverse engineering](https://cat-in-136.github.io/2020/07/b1248-led-name-badge-protocol-reverse-engineering.html) and [cat-in-136/led-name-badge](https://github.com/cat-in-136/led-name-badge) (USB HID protocol)
