@@ -362,7 +362,7 @@ def main():
         "curtain": Motion.CURTAIN,
         "laser": Motion.LASER
     }
-    parser = argparse.ArgumentParser(description="USB writer for M1-8 matrix LED name badge.")
+    parser = argparse.ArgumentParser(description="Write text and images to LED name badges (serial M1-8 and USB HID B1248).")
     parser.add_argument("paths", metavar="path", type=str, nargs="+",
                         help=f"an image path for bitmap (able to write to slot 1-{SLOT_MAX}).")
     parser.add_argument("-T", "--text", action="store_true",
