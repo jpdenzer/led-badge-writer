@@ -135,6 +135,42 @@ Write 2 bitmaps to slot 1 and 2, blink bitmap 1 and show border bitmap 2:
 m18write --blink1 --border2 image1.png image2.png
 ```
 
+Write text instead of images (each argument goes to its own slot):
+
+```
+m18write --text "Hello" "Nice to meet you"
+```
+
+... with a TrueType/OpenType font (sized to fit the display unless `--font-size` is given):
+
+```
+m18write --text --font /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf "Hello"
+```
+
+Preview text without writing to the badge:
+
+```
+m18write --text --preview "Hello"
+```
+
+### USB HID badge (B1248, `0483:5750`)
+
+Some 11x44 badges show up as a USB HID device (`0483:5750`) instead of a serial port. Write to them with `--hid`:
+
+```
+m18write --hid --text "Hello"
+m18write --hid --motion1 freeze --blink2 image1.png image2.png
+```
+
+With `--hid`, all slots together can be at most 64 columns (512 pixels) wide. Brightness and laser motion are not supported.
+
+On Linux, allow access to the badge with a udev rule, then replug it:
+
+```
+echo 'SUBSYSTEMS=="usb", ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5750", MODE="0666"' | sudo tee /etc/udev/rules.d/99-led-badge.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
 Show help:
 
 ```
@@ -145,6 +181,12 @@ m18write -h
 
 ```
 pip install m1-8-writer
+```
+
+For USB HID badges, install with HID support:
+
+```
+pip install "m1-8-writer[hid]"
 ```
 
 ## Licence

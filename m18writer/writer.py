@@ -9,10 +9,10 @@ import logging
 from logging import getLogger, StreamHandler
 import math
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import serial
 
 logger = getLogger(__name__)
@@ -27,6 +27,12 @@ COLUMNS_MAX = 255
 PIXEL_PER_COLUMN = 8
 MAGIC_NUMBER = [0x41, 0x68, 0x65, 0x6c, 0x6c, 0x6f]
 PREVIEW_PIXEL_GAP = (14, 14)
+# B1248: 11x44 badge with USB HID interface
+HID_VENDOR_ID = 0x0483
+HID_PRODUCT_ID = 0x5750
+HID_LINES = 11
+HID_WIDTH = 44
+HID_REPORT_SIZE = 64
 
 
 class Brightness(IntEnum):
@@ -117,9 +123,13 @@ def _build_body(slot_list: List[Slot]) -> bytes:
     ]))
 
 
-def load_image(path: str, lines: int, threshold: int, **mode) -> Slot:
-    image = Image.open(path).convert("L")
-    image = image.resize((int(image.width * (lines / image.height)), lines), Image.BICUBIC)
+def _fit_image(image: Image.Image, lines: int) -> Image.Image:
+    image = image.convert("L")
+    return image.resize((int(image.width * (lines / image.height)), lines), Image.BICUBIC)
+
+
+def image_to_slot(image: Image.Image, lines: int, threshold: int, **mode) -> Slot:
+    image = _fit_image(image, lines)
     columns = min(COLUMNS_MAX, math.ceil(image.width / PIXEL_PER_COLUMN))
     pixel_list = bytes(
         [1 if x > threshold else 0
@@ -132,9 +142,61 @@ def load_image(path: str, lines: int, threshold: int, **mode) -> Slot:
     return Slot(bitmap=bitmap, columns=columns, **mode)
 
 
+def load_image(path: str, lines: int, threshold: int, **mode) -> Slot:
+    return image_to_slot(Image.open(path), lines, threshold, **mode)
+
+
+def _draw_text(text: str, font) -> Image.Image:
+    """Draw text without antialiasing and crop it to the lit pixels."""
+    width, height = font.getmask(text).size
+    width, height = max(width, 1), max(height, 1)
+    # generous margin for glyphs which overhang their mask box
+    canvas = Image.new("L", (width + height * 2, height * 3))
+    draw = ImageDraw.Draw(canvas)
+    draw.fontmode = "1"
+    draw.text((height, height), text, fill=255, font=font)
+    bbox = canvas.getbbox()
+    return canvas.crop(bbox) if bbox else Image.new("L", (PIXEL_PER_COLUMN, 1))
+
+
+def render_text(text: str, lines: int,
+                font_path: Optional[str] = None, font_size: Optional[int] = None) -> Image.Image:
+    """Render text as a bitmap image exactly `lines` pixels high.
+
+    Without `font_path`, Pillow's built-in bitmap font is used.
+    Without `font_size`, the largest size that fits in `lines` is chosen.
+
+    >>> render_text("Hello", 12).height
+    12
+    """
+    if font_path is None:
+        glyphs = _draw_text(text, ImageFont.load_default())
+    elif font_size is not None:
+        glyphs = _draw_text(text, ImageFont.truetype(font_path, font_size))
+    else:
+        for size in range(lines * 2, 0, -1):
+            glyphs = _draw_text(text, ImageFont.truetype(font_path, size))
+            if glyphs.height <= lines:
+                break
+    if glyphs.height > lines:
+        logger.warning("Text is %d px high and will be scaled to %d lines.", glyphs.height, lines)
+        return glyphs
+    image = Image.new("L", (glyphs.width, lines))
+    image.paste(glyphs, (0, (lines - glyphs.height) // 2))
+    return image
+
+
+def load_text(text: str, lines: int, threshold: int,
+              font_path: Optional[str] = None, font_size: Optional[int] = None, **mode) -> Slot:
+    return image_to_slot(render_text(text, lines, font_path, font_size), lines, threshold, **mode)
+
+
 def save_preview(path: str, lines: int, display_width: int, save_path: str):
-    image = Image.open(path).convert("L")
-    image = image.resize((int(image.width * (lines / image.height)), lines), Image.BICUBIC)
+    save_preview_image(Image.open(path), lines, display_width, save_path)
+
+
+def save_preview_image(image: Image.Image, lines: int, display_width: int, save_path: str):
+    image = _fit_image(image, lines)
 
     mask = np.array(Image.open(Path(__file__).parent / "mask.png"))
     display_size = (PREVIEW_PIXEL_GAP[1] * lines, PREVIEW_PIXEL_GAP[0] * display_width)
@@ -157,6 +219,75 @@ def write_payload(brightness: Brightness, slot_list: List[Slot], device="/dev/tt
     payload = header + body[:16] + bytes([0 for x in range(32)]) + body[16:]
     m18 = serial.Serial(device, baud)
     m18.write(payload)
+
+
+def _build_hid_reports(slot_list: List[Slot]) -> List[bytes]:
+    """Build 64-byte reports for the B1248 HID badge.
+
+    "Hello", slot configuration, one report per line (all bitmaps side by side)
+    and a dummy line.
+
+    >>> reports = _build_hid_reports([Slot(bitmap=bytes(range(11)), columns=1)])
+    >>> len(reports), reports[0][:5], reports[1][:18].hex()
+    (14, b'Hello', '004040404040404040000800000108010000')
+    >>> [r[0] for r in reports[2:]]
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0]
+    """
+    slot_list = (slot_list + [Slot() for x in range(SLOT_MAX)])[:SLOT_MAX]
+    if any(x.motion == Motion.LASER for x in slot_list):
+        raise RuntimeError("Laser motion is not supported on HID badge.")
+    for x in slot_list:
+        if x.columns and len(x.bitmap) != x.columns * HID_LINES:
+            raise RuntimeError(f"Bitmaps must be {HID_LINES} lines high for HID badge.")
+    columns_list = [x.columns for x in slot_list]
+    column_offset_list = [0] + list(itertools.accumulate(columns_list))
+    if column_offset_list[-1] > HID_REPORT_SIZE:
+        raise RuntimeError(
+            "Total columns must be {} or less (8 pixels/column): {}".format(
+                HID_REPORT_SIZE, columns_list)
+        )
+
+    config = bytes([
+        0x00,
+        *[x.get_mode() for x in slot_list],
+        0x00,
+        *itertools.chain.from_iterable([
+            [0x08, column_offset_list[x], 0x00, columns_list[x]]
+            for x in range(SLOT_MAX)
+        ]),
+    ])
+    lines = []
+    for line in range(HID_LINES):
+        report = bytearray(HID_REPORT_SIZE)
+        for x, offset in zip(slot_list, column_offset_list):
+            report[offset:(offset + x.columns)] = x.bitmap[(line * x.columns):((line + 1) * x.columns)]
+        lines.append(bytes(report))
+    return [
+        b"Hello".ljust(HID_REPORT_SIZE, b"\x00"),
+        config.ljust(HID_REPORT_SIZE, b"\x00"),
+        *lines,
+        bytes(HID_REPORT_SIZE),
+    ]
+
+
+def write_hid_payload(slot_list: List[Slot], vendor_id=HID_VENDOR_ID, product_id=HID_PRODUCT_ID):
+    import hid
+
+    reports = _build_hid_reports(slot_list)
+    device = hid.device()
+    try:
+        device.open(vendor_id, product_id)
+    except OSError as e:
+        raise RuntimeError(
+            f"Cannot open HID badge {vendor_id:04x}:{product_id:04x} "
+            "(is it plugged in/attached, and do you have permission?)"
+        ) from e
+    try:
+        for report in reports:
+            # the first byte is report ID
+            device.write(b"\x00" + report)
+    finally:
+        device.close()
 
 
 def main():
@@ -190,18 +321,27 @@ def main():
     parser = argparse.ArgumentParser(description="USB writer for M1-8 matrix LED name badge.")
     parser.add_argument("paths", metavar="path", type=str, nargs="+",
                         help=f"an image path for bitmap (able to write to slot 1-{SLOT_MAX}).")
+    parser.add_argument("-T", "--text", action="store_true",
+                        help="treat each path as text to display instead of an image path.")
+    parser.add_argument("-f", "--font", type=str, default=None,
+                        help="TrueType/OpenType font file for --text (default: built-in bitmap font).")
+    parser.add_argument("-s", "--font-size", type=int, default=None,
+                        help="font size for --font (default: largest size fitting the lines).")
+    parser.add_argument("--hid", action="store_true",
+                        help=f"write to {HID_LINES}x{HID_WIDTH} USB HID badge "
+                             f"({HID_VENDOR_ID:04x}:{HID_PRODUCT_ID:04x}) instead of serial badge.")
     parser.add_argument("-d", "--device", type=str, default="/dev/ttyUSB0",
                         help="tty of LED name badge.")
     parser.add_argument("-b", "--baud", type=int, default=1200,
                         help="baud rate of LED name badge.")
-    parser.add_argument("-l", "--lines", type=int, default=12,
-                        help="number of lines of LED name badge.")
-    parser.add_argument("-w", "--width", type=int, default=48,
-                        help="number of columns of LED name badge.")
+    parser.add_argument("-l", "--lines", type=int, default=None,
+                        help=f"number of lines of LED name badge (default: 12, {HID_LINES} with --hid).")
+    parser.add_argument("-w", "--width", type=int, default=None,
+                        help=f"number of columns of LED name badge (default: 48, {HID_WIDTH} with --hid).")
     parser.add_argument("-t", "--threshold", type=int, default=128,
                         help="threshold of bitmap pixel to light LED.")
-    parser.add_argument("--brightness", default="4", choices=brightness_list,
-                        help="brightness of LED name badge.")
+    parser.add_argument("--brightness", default=None, choices=brightness_list,
+                        help="brightness of LED name badge (default: 4, unsupported with --hid).")
     parser.add_argument("-p", "--preview", action="store_true",
                         help="save preview of images (skip writing payload).")
     for x in range(SLOT_MAX):
@@ -222,9 +362,20 @@ def main():
                                  if x == 0 else argparse.SUPPRESS)
 
     args = parser.parse_args()
+    if args.lines is None:
+        args.lines = HID_LINES if args.hid else 12
+    if args.width is None:
+        args.width = HID_WIDTH if args.hid else 48
+    if args.hid and args.brightness is not None:
+        logger.warning("--brightness is not supported with --hid and is ignored.")
+    brightness = brightness_list[args.brightness or "4"]
+    if args.text:
+        images = [render_text(x, args.lines, args.font, args.font_size) for x in args.paths]
+    else:
+        images = [Image.open(x) for x in args.paths]
     if not args.preview:
         slot_list = [
-            load_image(
+            image_to_slot(
                 x, args.lines, args.threshold,
                 **{k: v for k, v in{
                     "border": getattr(args, f"border{i + 1}"),
@@ -233,12 +384,15 @@ def main():
                     "motion": motion_list.get(getattr(args, f"motion{i + 1}"))
                 }.items() if v is not None}
             )
-            for i, x in enumerate(args.paths[:SLOT_MAX])
+            for i, x in enumerate(images[:SLOT_MAX])
         ]
-        write_payload(brightness_list[args.brightness], slot_list)
+        if args.hid:
+            write_hid_payload(slot_list)
+        else:
+            write_payload(brightness, slot_list, args.device, args.baud)
     else:
-        for i, p in enumerate(args.paths):
-            save_preview(p, args.lines, args.width, getattr(args, f"savepath{i + 1}"))
+        for i, image in enumerate(images[:SLOT_MAX]):
+            save_preview_image(image, args.lines, args.width, getattr(args, f"savepath{i + 1}"))
 
 
 if __name__ == "__main__":
